@@ -1,0 +1,34 @@
+# Build artifacts
+build/
+out/
+bin/
+obj/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+
+# CLion
+.idea/
+cmake-build-*/
+.ipynb_checkpoints
+
+# VS Code
+.vscode/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Misc
+*.tmp
+*.bak
