@@ -6,6 +6,8 @@
 #include <bitset>
 #include <optional>
 #include <print>
+#include <ranges>
+#include <unordered_map>
 
 struct Cos1 {
     uint32_t value;
@@ -31,9 +33,11 @@ struct IsComponentType<ComponentList<Components ...>> : std::true_type {};
 template <typename Type>
 concept ComponentListType = IsComponentType<Type>::value;
 
+template<typename... Components>
+struct EntityBuilder;
+
 template <typename...>
 struct TypeList {};
-
 
 template<typename...>
 struct ValueList;
@@ -83,16 +87,50 @@ struct StorageIterator {
 
     explicit StorageIterator(std::vector<Components>&... components) : ranges(RangeType<Components>(components)...) {}
 
-    auto isEmpty() {
-        return (isEmpty<Components>() || ...);
+    // Iterator type for range\-based for
+    struct Iterator {
+        template<typename Type>
+        using ItType = decltype(std::declval<RangeType<Type>>().begin());
+
+        using ItList = ValueList<ItType<Components>...>;
+
+        ItList begins;
+        ItList ends;
+
+        Iterator(ItList&& b, ItList&& e) : begins(std::forward<ItList>(b)), ends(std::forward<ItList>(e)) {}
+
+        // Dereference: return tuple-like ValueList of const refs to components
+        auto operator*() const {
+            return ValueList<const Components&...>{((*begins.template get<ItType<Components>>()))...};
+        }
+
+        // Pre-increment: advance all iterators
+        Iterator& operator++() {
+            (void)std::initializer_list<int>{(++begins.template get<ItType<Components>>(), 0)...};
+            return *this;
+        }
+
+        // Compare: continue while all begins != end (stop when any reaches end)
+        bool operator!=(const Iterator& other) const {
+            return ((begins.template get<ItType<Components>>() != other.ends.template get<ItType<Components>>()) && ...);
+        }
+    };
+
+    Iterator begin() {
+        using ItList = typename Iterator::ItList;
+        return Iterator(
+            ItList{ ranges.template get<RangeType<Components>>().begin()... },
+            ItList{ ranges.template get<RangeType<Components>>().end()... }
+        );
     }
 
-    auto next() {
-        return (next<Components>(), ...);
-    }
-
-    auto getCurrentRef() {
-        return ValueList<const Components&...>{getCurrentRef<Components>()...};
+    Iterator end() {
+        using ItList = typename Iterator::ItList;
+        // end iterator uses ends for comparison; begins set to ends as well
+        return Iterator(
+            ItList{ ranges.template get<RangeType<Components>>().end()... },
+            ItList{ ranges.template get<RangeType<Components>>().end()... }
+        );
     }
 
 private:
@@ -120,10 +158,35 @@ private:
 template <typename... Ts>
 StorageIterator(std::vector<Ts>&...) -> StorageIterator<std::decay_t<Ts>...>;
 
+template<typename... Components>
+struct EntityBuilder {
+    EntityBuilder() =  default;
+
+    template<typename Component>
+    auto& withComponent(Component&& component) noexcept {
+        components.template get<std::optional<Component>>().emplace(std::forward<Component>(component));
+        return *this;
+    }
+
+    auto getArchetype() const noexcept {
+        return (getComponentBit<Components>() | ...);
+    }
+
+    template<typename Component>
+    auto getComponentBit() const noexcept {
+        auto index = ComponentList<Components...>{}.template getComponentIndex<Component>();
+        return  components.template get<std::optional<Component>>().has_value() ? (static_cast<uint64_t>(1) << index) : 0;
+    }
+
+    ValueList<std::optional<Components>...> components;
+};
+
 template <typename ... Types>
 struct ComponentStorage {
     template<typename... ArchetypeComponents>
     ComponentStorage(ComponentList<ArchetypeComponents...>) : archetypeMask{ComponentList<Types...>{}.template getComponentsMask<ArchetypeComponents...>()} {}
+
+    ComponentStorage(uint64_t archetypeMask) : archetypeMask{archetypeMask} {}
 
     auto getReferenceIterator() {
         return StorageIterator<Types...>(getComponents<Types>()...);
@@ -144,6 +207,15 @@ struct ComponentStorage {
         (pushToStorage<ArchetypeComponents>(std::forward<ArchetypeComponents>(components)), ...);
     }
 
+    void push(EntityBuilder<Types...>&& entity) {
+        auto entityArchetype = entity.getArchetype();
+        if (entityArchetype != archetypeMask) {
+            std::println("Error: Trying to push components that do not match the archetype mask!");
+            std::exit(EXIT_FAILURE);
+        }
+        pushEntity(std::move(entity.components));
+    }
+
     ValueList<std::vector<Types>...> components;
     uint64_t archetypeMask = {0};
 
@@ -153,6 +225,17 @@ private:
     template<typename Type>
     auto& getComponents() noexcept {
         return components.template get<std::vector<Type>>();
+    }
+
+    void pushEntity(ValueList<std::optional<Types>...>&& components) {
+        (pushComponent(std::move(components.template get<std::optional<Types>>())), ...);
+    }
+
+    template<typename Type>
+    void pushComponent(std::optional<Type>&& component) {
+        if (component.has_value()) {
+            pushToStorage<Type>(std::forward<Type>(component.value()));
+        }
     }
 
     template<typename Type>
@@ -176,7 +259,6 @@ struct ComponentReferences<Type, Types ...> {
 
 // COMPONENT LIST
 
-
 template <>
 struct ComponentList<> {
     template <typename ... Types>
@@ -199,6 +281,7 @@ template <typename Type, typename... Types>
 struct ComponentList<Type, Types...> {
     using Storage = ComponentStorage<Type, Types ...>;
     using References = ComponentReferences<Type, Types ...>;
+    using Entity = EntityBuilder<Type, Types...>;
 
     template <typename... OtherTypes>
     constexpr bool intersects(ComponentList<OtherTypes...> otherComponentList) {
@@ -243,27 +326,47 @@ struct ListComponentList {
     }
 };
 
-// SYSTEM
-template <ComponentListType ReadList, ComponentListType Components>
-struct System {
-    using Storage = typename Components::Storage;
-    using References = typename Components::References;
-
-    void runSystem(const Storage& components) {
-
-    }
-
-    virtual bool execute(const References& references) = 0;
-
-    virtual ~System() = default;
-};
+// // SYSTEM
+// template <ComponentListType ReadList, ComponentListType Components>
+// struct System {
+//     using Storage = typename Components::Storage;
+//     using References = typename Components::References;
+//
+//     void runSystem(const Storage& components) {
+//
+//     }
+//
+//     virtual bool execute(const References& references) = 0;
+//
+//     virtual ~System() = default;
+// };
 
 using TestComponentList_1 = ComponentList<Cos1, Cos2, Cos3, Cos4>;
 using TestComponentList_2 = ComponentList<Cos4>;
 
+template<typename... Components>
+struct MasterStorage {
+    std::unordered_map<uint64_t, ComponentStorage<Components...>> masterMap;
+
+    void push(EntityBuilder<Components...>&& entity) {
+        auto archetype = entity.getArchetype();
+        auto [it, inserted] = masterMap.try_emplace(archetype, ComponentStorage<Components...>{archetype});
+        it->second.push(std::move(entity));
+    }
+
+    // TODO: remove the need to use a double loop
+    template<typename... ArchetypeComponents>
+    auto getMasterIterator() {
+        auto archetypeMask = ComponentList<Components...>{}.template getComponentsMask<ArchetypeComponents...>();
+        return std::views::filter(masterMap, [archetypeMask](const auto& pair) {
+            return (pair.first & archetypeMask) == archetypeMask;
+        }) | std::views::transform([](auto& pair) {
+            return pair.second.template getReferenceIterator<ArchetypeComponents...>();
+        });
+    }
+};
+
 int main() {
-    // TODO: make storage of ComponentStorages
-    //auto list = ListComponentList<>().append<TestComponentList_1>().append<TestComponentList_2>();
     auto componentStorage = TestComponentList_1::makeArchetypeStorage<Cos1, Cos2, Cos3>();
 
     componentStorage.push(Cos1{42}, Cos2{"123"}, Cos3{3.14});
@@ -271,33 +374,64 @@ int main() {
     componentStorage.push(Cos1{28}, Cos2{"jsdajs"}, Cos3{32});
 
     auto storageIterator = componentStorage.getReferenceIterator<Cos1, Cos2, Cos3>();
-    while (!storageIterator.isEmpty()) {
-        auto it = storageIterator.getCurrentRef();
-        const auto& cos1 = it.template get<const Cos1&>();
-        const auto& cos2 = it.template get<const Cos2&>();
-        const auto& cos3 = it.template get<const Cos3&>();
+    for (auto x : storageIterator) {
+        const auto& cos1 = x.template get<const Cos1&>();
+        const auto& cos2 = x.template get<const Cos2&>();
+        const auto& cos3 = x.template get<const Cos3&>();
         std::cout << cos1.value << " " << cos2.msg << " " << cos3.value << "ite1" << std::endl;
-        storageIterator.next();
     }
 
     std::cout << "\n\n";
 
     auto storageIterator2 = componentStorage.getReferenceIterator<Cos1, Cos2>();
-    while (!storageIterator2.isEmpty()) {
-        auto it = storageIterator2.getCurrentRef();
-        const auto& cos1 = it.template get<const Cos1&>();
-        const auto& cos2 = it.template get<const Cos2&>();
+    for (auto x : storageIterator2) {
+        const auto& cos1 = x.template get<const Cos1&>();
+        const auto& cos2 = x.template get<const Cos2&>();
         std::cout << cos1.value << " " << cos2.msg << "ite2" << std::endl;
-        storageIterator2.next();
     }
 
     auto mask1 = TestComponentList_1{}.getComponentsMask<Cos1, Cos3>();
     auto mask2 = TestComponentList_1{}.getComponentsMask<Cos3, Cos1>();
     auto mask3 = TestComponentList_1{}.getComponentsMask<Cos2>();
 
-    std::cout << "mask1: " << std::bitset<64>(mask1) << std::endl;
-    std::cout << "mask2: " << std::bitset<64>(mask2) << std::endl;
-    std::cout << "mask3: " << std::bitset<64>(mask3) << std::endl;
+    std::cout << "mask1:\t" << std::bitset<64>(mask1) << std::endl;
+    std::cout << "mask2:\t" << std::bitset<64>(mask2) << std::endl;
+    std::cout << "mask3:\t" << std::bitset<64>(mask3) << std::endl;
+
+    auto entity = typename TestComponentList_1::Entity{}.withComponent(Cos1{42}).withComponent(Cos4{});
+    std::cout << "Entity Archetype:\t" << std::bitset<64>(entity.getArchetype()) << std::endl;
+
+    auto entity2 = typename TestComponentList_1::Entity{}.withComponent(Cos1{42}).withComponent(Cos2{"65"}).withComponent(Cos3{0.123});
+    componentStorage.push(std::move(entity2));
+
+    auto storageIterator3 = componentStorage.getReferenceIterator<Cos1, Cos2, Cos3>();
+    for (auto x : storageIterator3) {
+        const auto& cos1 = x.template get<const Cos1&>();
+        const auto& cos2 = x.template get<const Cos2&>();
+        const auto& cos3 = x.template get<const Cos3&>();
+        std::cout << cos1.value << " " << cos2.msg << " " << cos3.value << "ite1" << std::endl;
+    }
+
+    std::cout << "\n\n";
+
+    MasterStorage<Cos1, Cos2, Cos3, Cos4> masterStorage;
+    auto entity3 = typename TestComponentList_1::Entity{}.withComponent(Cos1{99}).withComponent(Cos2{"Master 3"}).withComponent(Cos3{9.99});
+    auto entity4 = typename TestComponentList_1::Entity{}.withComponent(Cos1{97}).withComponent(Cos2{"Master 4"}).withComponent(Cos3{9.91});
+    auto entity5 = typename TestComponentList_1::Entity{}.withComponent(Cos1{97}).withComponent(Cos2{"Master 5"}).withComponent(Cos3{9.91}).withComponent(Cos4{});
+    auto entity6 = typename TestComponentList_1::Entity{}.withComponent(Cos1{97}).withComponent(Cos2{"Master 6"}).withComponent(Cos3{9.91}).withComponent(Cos4{});
+    masterStorage.push(std::move(entity3));
+    masterStorage.push(std::move(entity4));
+    masterStorage.push(std::move(entity5));
+    masterStorage.push(std::move(entity6));
+
+    auto masterIterator = masterStorage.getMasterIterator<Cos1, Cos2>();
+    for (auto z : masterIterator) {
+        for (auto x : z) {
+            const auto& cos1 = x.template get<const Cos1&>();
+            const auto& cos2 = x.template get<const Cos2&>();
+            std::cout << cos1.value << " " << cos2.msg << " master ite" << std::endl;
+        }
+    }
 
     return 0;
 }
