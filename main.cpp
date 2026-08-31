@@ -18,7 +18,10 @@ struct Cos2 {
 struct Cos3 {
     float value;
 };
-struct Cos4{};
+struct Cos4{
+    float cos;
+    float co2;
+};
 
 template <typename ...>
 struct ComponentList;
@@ -81,84 +84,6 @@ struct ValueList<Type, Types...> {
 };
 
 template<typename... Components>
-struct StorageIterator {
-    template<typename Type>
-    using RangeType = decltype(std::ranges::subrange(std::declval<std::vector<Type>&>()));
-
-    explicit StorageIterator(std::vector<Components>&... components) : ranges(RangeType<Components>(components)...) {}
-
-    // Iterator type for range\-based for
-    struct Iterator {
-        template<typename Type>
-        using ItType = decltype(std::declval<RangeType<Type>>().begin());
-
-        using ItList = ValueList<ItType<Components>...>;
-
-        ItList begins;
-        ItList ends;
-
-        Iterator(ItList&& b, ItList&& e) : begins(std::forward<ItList>(b)), ends(std::forward<ItList>(e)) {}
-
-        // Dereference: return tuple-like ValueList of const refs to components
-        auto operator*() const {
-            return ValueList<const Components&...>{((*begins.template get<ItType<Components>>()))...};
-        }
-
-        // Pre-increment: advance all iterators
-        Iterator& operator++() {
-            (void)std::initializer_list<int>{(++begins.template get<ItType<Components>>(), 0)...};
-            return *this;
-        }
-
-        // Compare: continue while all begins != end (stop when any reaches end)
-        bool operator!=(const Iterator& other) const {
-            return ((begins.template get<ItType<Components>>() != other.ends.template get<ItType<Components>>()) && ...);
-        }
-    };
-
-    Iterator begin() {
-        using ItList = typename Iterator::ItList;
-        return Iterator(
-            ItList{ ranges.template get<RangeType<Components>>().begin()... },
-            ItList{ ranges.template get<RangeType<Components>>().end()... }
-        );
-    }
-
-    Iterator end() {
-        using ItList = typename Iterator::ItList;
-        // end iterator uses ends for comparison; begins set to ends as well
-        return Iterator(
-            ItList{ ranges.template get<RangeType<Components>>().end()... },
-            ItList{ ranges.template get<RangeType<Components>>().end()... }
-        );
-    }
-
-private:
-    template<typename Type>
-    auto isEmpty() const noexcept {
-        const auto& range = ranges.template get<RangeType<Type>>();
-        return range.begin() == range.end();
-    }
-
-    template<typename Type>
-    void next() noexcept {
-        auto& range = ranges.template get<RangeType<Type>>();
-        range = RangeType<Type>(range.begin() + 1, range.end());
-    }
-
-    template<typename Type>
-    const auto& getCurrentRef() const noexcept {
-        const auto& range = ranges.template get<RangeType<Type>>();
-        return *range.begin();
-    }
-
-    ValueList<RangeType<Components> ...> ranges;
-};
-
-template <typename... Ts>
-StorageIterator(std::vector<Ts>&...) -> StorageIterator<std::decay_t<Ts>...>;
-
-template<typename... Components>
 struct EntityBuilder {
     EntityBuilder() =  default;
 
@@ -189,12 +114,12 @@ struct ComponentStorage {
     ComponentStorage(uint64_t archetypeMask) : archetypeMask{archetypeMask} {}
 
     auto getReferenceIterator() {
-        return StorageIterator<Types...>(getComponents<Types>()...);
+        return std::views::zip(getComponents<Types>()...);
     }
 
     template <typename... ComponentTypes>
     auto getReferenceIterator() {
-        return StorageIterator<ComponentTypes...>(getComponents<ComponentTypes>()...);
+        return std::views::zip(getComponents<ComponentTypes>()...);
     }
 
     template<typename... ArchetypeComponents>
@@ -354,15 +279,16 @@ struct MasterStorage {
         it->second.push(std::move(entity));
     }
 
-    // TODO: remove the need to use a double loop
     template<typename... ArchetypeComponents>
     auto getMasterIterator() {
         auto archetypeMask = ComponentList<Components...>{}.template getComponentsMask<ArchetypeComponents...>();
         return std::views::filter(masterMap, [archetypeMask](const auto& pair) {
-            return (pair.first & archetypeMask) == archetypeMask;
-        }) | std::views::transform([](auto& pair) {
-            return pair.second.template getReferenceIterator<ArchetypeComponents...>();
-        });
+                return (pair.first & archetypeMask) == archetypeMask;
+            })
+          | std::views::transform([](auto& pair) {
+                return pair.second.template getReferenceIterator<ArchetypeComponents...>();
+            })
+          | std::views::join;
     }
 };
 
@@ -374,19 +300,14 @@ int main() {
     componentStorage.push(Cos1{28}, Cos2{"jsdajs"}, Cos3{32});
 
     auto storageIterator = componentStorage.getReferenceIterator<Cos1, Cos2, Cos3>();
-    for (auto x : storageIterator) {
-        const auto& cos1 = x.template get<const Cos1&>();
-        const auto& cos2 = x.template get<const Cos2&>();
-        const auto& cos3 = x.template get<const Cos3&>();
+    for (auto [cos1, cos2, cos3] : storageIterator) {
         std::cout << cos1.value << " " << cos2.msg << " " << cos3.value << "ite1" << std::endl;
     }
 
     std::cout << "\n\n";
 
     auto storageIterator2 = componentStorage.getReferenceIterator<Cos1, Cos2>();
-    for (auto x : storageIterator2) {
-        const auto& cos1 = x.template get<const Cos1&>();
-        const auto& cos2 = x.template get<const Cos2&>();
+    for (auto [cos1, cos2] : storageIterator2) {
         std::cout << cos1.value << " " << cos2.msg << "ite2" << std::endl;
     }
 
@@ -405,10 +326,7 @@ int main() {
     componentStorage.push(std::move(entity2));
 
     auto storageIterator3 = componentStorage.getReferenceIterator<Cos1, Cos2, Cos3>();
-    for (auto x : storageIterator3) {
-        const auto& cos1 = x.template get<const Cos1&>();
-        const auto& cos2 = x.template get<const Cos2&>();
-        const auto& cos3 = x.template get<const Cos3&>();
+    for (auto [cos1, cos2, cos3] : storageIterator3) {
         std::cout << cos1.value << " " << cos2.msg << " " << cos3.value << "ite1" << std::endl;
     }
 
@@ -417,21 +335,28 @@ int main() {
     MasterStorage<Cos1, Cos2, Cos3, Cos4> masterStorage;
     auto entity3 = typename TestComponentList_1::Entity{}.withComponent(Cos1{99}).withComponent(Cos2{"Master 3"}).withComponent(Cos3{9.99});
     auto entity4 = typename TestComponentList_1::Entity{}.withComponent(Cos1{97}).withComponent(Cos2{"Master 4"}).withComponent(Cos3{9.91});
-    auto entity5 = typename TestComponentList_1::Entity{}.withComponent(Cos1{97}).withComponent(Cos2{"Master 5"}).withComponent(Cos3{9.91}).withComponent(Cos4{});
-    auto entity6 = typename TestComponentList_1::Entity{}.withComponent(Cos1{97}).withComponent(Cos2{"Master 6"}).withComponent(Cos3{9.91}).withComponent(Cos4{});
+    auto entity5 = typename TestComponentList_1::Entity{}.withComponent(Cos1{97}).withComponent(Cos2{"Master 5"}).withComponent(Cos3{9.91}).withComponent(Cos4{4.f, 1.5f});
+    auto entity6 = typename TestComponentList_1::Entity{}.withComponent(Cos1{97}).withComponent(Cos2{"Master 6"}).withComponent(Cos3{9.91}).withComponent(Cos4{6.f, 1.f});
     masterStorage.push(std::move(entity3));
     masterStorage.push(std::move(entity4));
     masterStorage.push(std::move(entity5));
     masterStorage.push(std::move(entity6));
 
-    auto masterIterator = masterStorage.getMasterIterator<Cos1, Cos2>();
-    for (auto z : masterIterator) {
-        for (auto x : z) {
-            const auto& cos1 = x.template get<const Cos1&>();
-            const auto& cos2 = x.template get<const Cos2&>();
-            std::cout << cos1.value << " " << cos2.msg << " master ite" << std::endl;
-        }
+    auto masterIterator = masterStorage.getMasterIterator<Cos1, Cos4>();
+    for (auto [cos1, cos4] : masterIterator) {
+        std::cout << cos4.co2 << " " << " master ite" << std::endl;
     }
 
     return 0;
 }
+
+
+// TODO:
+//  * remove component
+//      - after id of entity then remove whole entity
+//  * id of entity
+//  * Add addComponent function
+//  * There will be needed 3 types of systems:
+//      - framework systems (master iterator)
+//      - user component system (just a function that will be run by framework with just one entity)
+//      - user enitties system (user system with master iterator if user would need to loop over all entites, e.g. find nearest enemy)
